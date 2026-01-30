@@ -1,0 +1,17 @@
+# Минимальный набор для Этапа 1 (чтобы установка была быстрой/стабильной на Windows).
+# Остальное (криптография, определение MIME и т.п.) добавим по мере реализации этапов 2–4.
+
+# Telegram Bot
+python-telegram-bot>=21.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# HTTP client for API requests (понадобится для VirusTotal/OpenRouter)
+httpx>=0.27.0
+
+# Database (понадобится со 2 этапа)
+aiosqlite>=0.20.0
+
+# Utilities
+python-dateutil>=2.9.0
