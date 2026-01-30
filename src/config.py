@@ -64,10 +64,14 @@ class Config:
             tuple[bool, Optional[str]]: (is_valid, error_message)
         """
         # Плейсхолдеры из .env.example считаем пустыми
-        _placeholder = ("your_telegram_bot_token_here", "your_virustotal_api_key_here")
+        _placeholders = (
+            "your_telegram_bot_token_here",
+            "your_virustotal_api_key_here",
+            "your_openrouter_api_key_here",
+        )
         def _empty(val: str) -> bool:
             v = (val or "").strip()
-            return not v or v in _placeholder
+            return not v or v in _placeholders
 
         missing = []
         if _empty(cls.TELEGRAM_BOT_TOKEN):
@@ -78,9 +82,12 @@ class Config:
             missing.append("OPENROUTER_API_KEY")
 
         if missing:
+            env_path = Path(cls.PROJECT_ROOT) / ".env"
             return False, (
                 f"В файле .env не заданы: {', '.join(missing)}. "
-                f"Откройте .env в корне проекта и укажите реальные значения (шаблон — .env.example)."
+                f"Приложение читает переменные из файла .env (не из .env.example). "
+                f"Путь к .env: {env_path.resolve()}. "
+                f"Если ключи указаны только в .env.example — скопируйте их в .env или выполните: copy .env.example .env"
             )
         
         return True, None

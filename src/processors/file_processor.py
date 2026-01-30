@@ -16,7 +16,6 @@ from src.database.database import (
     save_virustotal_result,
     update_scan_status,
 )
-from src.integrations.llm_client import LLMClient, LLMError, vt_summary_from_result
 from src.integrations.virustotal_client import (
     VirusTotalClient,
     VirusTotalError,
@@ -77,26 +76,35 @@ def process_file(
         safe_delete(path)
         return {"success": False, "error_message": str(e)}
     except VirusTotalError as e:
-        logger.exception("VirusTotal error for file")
+        logger.warning("VirusTotal error for file: %s", e)
+        logger.exception("VirusTotal traceback")
         update_scan_status(scan_id, "error")
         safe_delete(path)
-        return {"success": False, "error_message": "Сервис проверки временно недоступен. Попробуйте позже."}
+        msg = "Сервис проверки временно недоступен. Попробуйте позже."
+        if "401" in str(e) or "ключ" in str(e).lower() or "api" in str(e).lower():
+            msg += " Проверьте VIRUSTOTAL_API_KEY в .env и логи (logs/bot.log)."
+        return {"success": False, "error_message": msg}
 
-    vt_summary = vt_summary_from_result(vt_result, "file")
     object_desc = f"Файл: {path.name}, MIME: {mime_type or 'unknown'}, hash: {file_hash[:16]}..."
 
     try:
-        llm_client = LLMClient()
-        analysis = llm_client.analyze(
+        from src.processors.threat_analyzer import analyze_from_vt_result
+        from src.integrations.llm_client import LLMError
+
+        analysis = analyze_from_vt_result(
             scan_type="file",
             object_description=object_desc,
-            vt_summary=vt_summary,
+            vt_result=vt_result,
         )
     except LLMError as e:
-        logger.exception("LLM error for file")
+        logger.warning("LLM error for file: %s", e)
+        logger.exception("LLM traceback")
         update_scan_status(scan_id, "error")
         safe_delete(path)
-        return {"success": False, "error_message": "Анализ временно недоступен. Попробуйте позже."}
+        msg = "Анализ временно недоступен. Попробуйте позже."
+        if "401" in str(e) or "ключ" in str(e).lower() or "429" in str(e):
+            msg += " Проверьте OPENROUTER_API_KEY и OPENROUTER_MODEL в .env, логи: logs/bot.log."
+        return {"success": False, "error_message": msg}
     finally:
         safe_delete(path)
 

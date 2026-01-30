@@ -212,20 +212,31 @@ class LLMClient:
         if not isinstance(content, str):
             content = str(content)
 
-        raw = _extract_json_from_content(content)
-        return _validate_llm_response(raw)
+        try:
+            raw = _extract_json_from_content(content)
+            return _validate_llm_response(raw)
+        except LLMResponseError as e:
+            logger.warning(
+                "LLM response parse error: %s. Content (first 500 chars): %s",
+                e,
+                (content or "")[:500],
+            )
+            raise
 
 
 def vt_summary_from_result(vt_result: dict[str, Any], object_type: str = "url") -> str:
     """
     Формирует краткую текстовую сводку из ответа VirusTotal для передачи в LLM.
     object_type: 'url' или 'file'.
+    Поддерживает и полный ответ API (data.attributes.stats), и вложенный объект (attributes.stats).
     """
     if not vt_result or not isinstance(vt_result, dict):
         return "Данные VirusTotal отсутствуют."
-    data = vt_result.get("data") or {}
+    data = vt_result.get("data") or vt_result
     attrs = data.get("attributes") or {}
     stats = attrs.get("last_analysis_stats") or attrs.get("stats") or {}
+    if not isinstance(stats, dict):
+        stats = {}
     malicious = stats.get("malicious", 0)
     suspicious = stats.get("suspicious", 0)
     undetected = stats.get("undetected", 0)

@@ -104,9 +104,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         result = await asyncio.to_thread(process_url_sync, url, user.id)
     except Exception as e:
-        logger.exception("Link processing error")
-        await status_msg.edit_text("Произошла ошибка при проверке. Попробуйте позже.")
+        logger.exception("Link processing error: %s", e)
+        await status_msg.edit_text("Произошла ошибка при проверке. Попробуйте позже. Подробности в logs/bot.log.")
         return
+    if not result.get("success"):
+        logger.warning("Link check failed for user %s: %s", user.id, result.get("error_message"))
     reply = _format_scan_result(result)
     await status_msg.edit_text(reply)
 
@@ -145,12 +147,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             user.id,
         )
     except Exception as e:
-        logger.exception("File processing error")
+        logger.exception("File processing error: %s", e)
         if file_path and file_path.is_file():
             safe_delete(file_path)
-        await status_msg.edit_text("Произошла ошибка при проверке файла. Попробуйте позже.")
+        await status_msg.edit_text("Произошла ошибка при проверке файла. Попробуйте позже. Подробности в logs/bot.log.")
         return
 
+    if not result.get("success"):
+        logger.warning("File check failed for user %s: %s", user.id, result.get("error_message"))
     reply = _format_scan_result(result)
     await status_msg.edit_text(reply)
 
