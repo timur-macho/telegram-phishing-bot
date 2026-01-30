@@ -23,7 +23,9 @@ load_dotenv(ENV_PATH)
 
 class Config:
     """Класс для хранения конфигурации приложения."""
-    
+
+    PROJECT_ROOT: Path = PROJECT_ROOT
+
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     

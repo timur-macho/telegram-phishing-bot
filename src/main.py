@@ -14,6 +14,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from src.config import config
+from src.database import init_db
 
 # Создаём директории (logs, temp и т.д.) до настройки логирования
 config.ensure_directories()
@@ -82,7 +83,10 @@ def main() -> None:
     
     # Создаем необходимые директории
     config.ensure_directories()
-    
+
+    # Инициализируем БД (таблицы и индексы)
+    init_db()
+
     # Создаем приложение
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     
