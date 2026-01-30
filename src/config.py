@@ -74,7 +74,8 @@ class Config:
             missing.append("TELEGRAM_BOT_TOKEN")
         if _empty(cls.VIRUSTOTAL_API_KEY):
             missing.append("VIRUSTOTAL_API_KEY")
-        # OpenRouter понадобится на этапе интеграции LLM (позже).
+        if _empty(cls.OPENROUTER_API_KEY):
+            missing.append("OPENROUTER_API_KEY")
 
         if missing:
             return False, (

@@ -1,0 +1,237 @@
+"""
+Клиент OpenRouter API для анализа угроз: формирование промпта, запрос к LLM,
+парсинг и валидация структурированного JSON. LLM выступает аналитическим слоем,
+финальные решения о безопасности не принимает.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any, Optional
+
+import httpx
+
+from src.config import config
+from src.security.security import sanitize_for_llm
+
+logger = logging.getLogger(__name__)
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+REQUEST_TIMEOUT = 90.0
+
+# Допустимые значения из требований
+THREAT_TYPES = frozenset({"phishing", "malware", "scam", "suspicious", "clean"})
+RISK_LEVELS = frozenset({"low", "medium", "high"})
+
+
+class LLMError(Exception):
+    """Ошибка при работе с LLM API."""
+    pass
+
+
+class LLMResponseError(LLMError):
+    """Некорректный или невалидный ответ LLM."""
+    pass
+
+
+def _build_analysis_prompt(
+    scan_type: str,
+    object_description: str,
+    vt_summary: str,
+    extra_context: Optional[str] = None,
+) -> str:
+    """
+    Формирует промпт для анализа. Все пользовательские данные проходят через sanitize_for_llm.
+    """
+    obj_safe = sanitize_for_llm(object_description)
+    vt_safe = sanitize_for_llm(vt_summary)
+    ctx_safe = sanitize_for_llm(extra_context or "")
+
+    prompt = f"""Ты — аналитик по кибербезопасности. Тебе переданы результаты автоматической проверки объекта и данные VirusTotal. Твоя задача — проанализировать их и вернуть строго структурированный вывод. Ты не принимаешь финальных решений о безопасности; твой вывод используется как аналитический слой.
+
+Тип объекта: {scan_type}
+Объект проверки: {obj_safe}
+Сводка VirusTotal: {vt_safe}
+"""
+    if ctx_safe:
+        prompt += f"\nДополнительный контекст: {ctx_safe}\n"
+    prompt += """
+Ответь только валидным JSON без markdown и пояснений, в следующем формате:
+{
+  "threat_type": "phishing" | "malware" | "scam" | "suspicious" | "clean",
+  "risk_level": "low" | "medium" | "high",
+  "explanation": "Краткое человекопонятное объяснение на русском (1–2 предложения)"
+}
+"""
+    return prompt
+
+
+def _extract_json_from_content(content: str) -> dict[str, Any]:
+    """Извлекает JSON из текста ответа (обрезка markdown-блоков и т.п.)."""
+    text = (content or "").strip()
+    # Убираем обёртку ```json ... ```
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        text = match.group(1).strip()
+    # Ищем первый { ... }
+    start = text.find("{")
+    if start == -1:
+        raise LLMResponseError("В ответе LLM не найден JSON-объект")
+    depth = 0
+    end = -1
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end == -1:
+        raise LLMResponseError("В ответе LLM некорректная структура JSON")
+    try:
+        return json.loads(text[start:end])
+    except json.JSONDecodeError as e:
+        raise LLMResponseError(f"Ошибка парсинга JSON от LLM: {e}") from e
+
+
+def _validate_llm_response(data: dict[str, Any]) -> dict[str, Any]:
+    """Проверяет наличие и допустимость threat_type, risk_level, explanation."""
+    if not isinstance(data, dict):
+        raise LLMResponseError("Ответ LLM не является объектом")
+    threat = data.get("threat_type")
+    if not threat or not isinstance(threat, str):
+        raise LLMResponseError("В ответе LLM отсутствует или некорректен threat_type")
+    threat_lower = threat.strip().lower()
+    if threat_lower not in THREAT_TYPES:
+        raise LLMResponseError(
+            f"Недопустимое значение threat_type: {threat}. Ожидается одно из: {sorted(THREAT_TYPES)}"
+        )
+    risk = data.get("risk_level")
+    if not risk or not isinstance(risk, str):
+        raise LLMResponseError("В ответе LLM отсутствует или некорректен risk_level")
+    risk_lower = risk.strip().lower()
+    if risk_lower not in RISK_LEVELS:
+        raise LLMResponseError(
+            f"Недопустимое значение risk_level: {risk}. Ожидается одно из: {sorted(RISK_LEVELS)}"
+        )
+    explanation = data.get("explanation")
+    if explanation is not None and not isinstance(explanation, str):
+        explanation = str(explanation)
+    return {
+        "threat_type": threat_lower,
+        "risk_level": risk_lower,
+        "explanation": (explanation or "").strip(),
+        "analysis_data": data,
+    }
+
+
+class LLMClient:
+    """
+    Клиент OpenRouter API для анализа угроз по данным проверки и VirusTotal.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
+        self._api_key = (api_key or config.OPENROUTER_API_KEY).strip()
+        self._model = (model or config.OPENROUTER_MODEL).strip()
+        if not self._api_key:
+            raise ValueError("OPENROUTER_API_KEY не задан")
+        if not self._model:
+            raise ValueError("OPENROUTER_MODEL не задан")
+
+    def analyze(
+        self,
+        scan_type: str,
+        object_description: str,
+        vt_summary: str,
+        extra_context: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Отправляет данные проверки в LLM и возвращает валидированный результат:
+        threat_type, risk_level, explanation, analysis_data.
+
+        Raises:
+            LLMError: при ошибке API или невалидном ответе.
+        """
+        prompt = _build_analysis_prompt(
+            scan_type=scan_type,
+            object_description=object_description,
+            vt_summary=vt_summary,
+            extra_context=extra_context,
+        )
+        payload = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1024,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/telegram-phishing-bot",
+        }
+
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+                payload_with_json = {**payload, "response_format": {"type": "json_object"}}
+                r = client.post(OPENROUTER_URL, json=payload_with_json, headers=headers)
+                if r.status_code == 400 and "response_format" in (r.text or "").lower():
+                    r = client.post(OPENROUTER_URL, json=payload, headers=headers)
+        except httpx.TimeoutException as e:
+            raise LLMError("Превышено время ожидания ответа от LLM") from e
+        except httpx.RequestError as e:
+            raise LLMError(f"Ошибка запроса к LLM: {e}") from e
+
+        if r.status_code != 200:
+            msg = r.text[:500] if r.text else r.reason_phrase
+            if r.status_code == 429:
+                raise LLMError("Превышен лимит запросов к LLM (429)")
+            if r.status_code == 401:
+                raise LLMError("Неверный API-ключ OpenRouter")
+            raise LLMError(f"LLM API вернул {r.status_code}: {msg}")
+
+        try:
+            body = r.json()
+        except json.JSONDecodeError as e:
+            raise LLMError("Ответ LLM не является валидным JSON") from e
+
+        choices = body.get("choices")
+        if not choices or not isinstance(choices, list):
+            raise LLMResponseError("В ответе LLM отсутствует choices")
+        msg = choices[0].get("message") if choices else None
+        if not msg or not isinstance(msg, dict):
+            raise LLMResponseError("В ответе LLM отсутствует message")
+        content = msg.get("content")
+        if content is None:
+            content = ""
+        if not isinstance(content, str):
+            content = str(content)
+
+        raw = _extract_json_from_content(content)
+        return _validate_llm_response(raw)
+
+
+def vt_summary_from_result(vt_result: dict[str, Any], object_type: str = "url") -> str:
+    """
+    Формирует краткую текстовую сводку из ответа VirusTotal для передачи в LLM.
+    object_type: 'url' или 'file'.
+    """
+    if not vt_result or not isinstance(vt_result, dict):
+        return "Данные VirusTotal отсутствуют."
+    data = vt_result.get("data") or {}
+    attrs = data.get("attributes") or {}
+    stats = attrs.get("last_analysis_stats") or attrs.get("stats") or {}
+    malicious = stats.get("malicious", 0)
+    suspicious = stats.get("suspicious", 0)
+    undetected = stats.get("undetected", 0)
+    harmless = stats.get("harmless", 0)
+    total = malicious + suspicious + undetected + harmless
+    parts = [f"malicious: {malicious}, suspicious: {suspicious}, undetected: {undetected}, harmless: {harmless}"]
+    if total:
+        parts.append(f"total engines: {total}")
+    return "VirusTotal stats: " + "; ".join(parts)
