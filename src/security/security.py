@@ -65,28 +65,28 @@ def validate_url(url: str) -> tuple[bool, Optional[str]]:
         (True, None) если URL допустим, иначе (False, сообщение об ошибке).
     """
     if not url or not isinstance(url, str):
-        return False, "Пустая или некорректная ссылка."
+        return False, "Empty or invalid URL."
     url = url.strip()
     if len(url) > 2048:
-        return False, "Ссылка слишком длинная."
+        return False, "URL is too long."
     try:
         parsed = urlparse(url)
     except Exception:
-        return False, "Некорректный формат ссылки."
+        return False, "Invalid URL format."
     if not parsed.scheme:
-        return False, "Укажите протокол (http или https)."
+        return False, "URL must include a protocol (http or https)."
     if parsed.scheme.lower() not in ALLOWED_URL_SCHEMES:
-        return False, "Допускаются только ссылки с протоколом http или https."
+        return False, "Only http and https URLs are allowed."
     netloc = (parsed.netloc or "").strip()
     if not netloc:
-        return False, "В ссылке отсутствует адрес сервера."
+        return False, "URL is missing a host/server address."
     # Блок по имени хоста (localhost, 127..., 10..., и т.д.)
     if BLOCKED_HOSTNAME_PATTERNS.match(netloc):
-        return False, "Ссылки на локальные и внутренние адреса проверять нельзя."
+        return False, "Local and internal network addresses are not allowed for analysis."
     # Если в netloc есть IP (например после разрешения DNS не делаем — только явный IP в URL)
     host = netloc.split(":")[0]
     if _is_private_or_reserved_ip(host):
-        return False, "Ссылки на локальные и внутренние адреса проверять нельзя."
+        return False, "Local and internal network addresses are not allowed for analysis."
     return True, None
 
 
@@ -138,10 +138,10 @@ def check_file_size(size_bytes: int, max_size: Optional[int] = None) -> tuple[bo
     """
     max_size = max_size if max_size is not None else config.MAX_FILE_SIZE
     if size_bytes < 0:
-        return False, "Некорректный размер файла."
+        return False, "Invalid file size."
     if size_bytes > max_size:
         mb = max_size / (1024 * 1024)
-        return False, f"Файл слишком большой. Максимум — {mb:.0f} МБ."
+        return False, f"File size exceeds the allowed limit ({mb:.0f} MB)."
     return True, None
 
 
@@ -155,12 +155,12 @@ def validate_file_mime(mime_type: Optional[str], size_bytes: int) -> tuple[bool,
     if not ok:
         return False, err
     if not mime_type or not mime_type.strip():
-        return False, "Не удалось определить тип файла."
+        return False, "Unable to determine file type."
     mime = mime_type.strip().lower().split(";")[0]
     if mime in BLOCKED_MIME_TYPES:
-        return False, "Этот тип файлов (исполняемый/скрипт) проверять нельзя."
+        return False, "Executable/script file types are not allowed for analysis."
     if mime not in ALLOWED_MIME_TYPES:
-        return False, "Этот тип файла пока не поддерживается для проверки."
+        return False, "Unsupported file type for analysis."
     return True, None
 
 

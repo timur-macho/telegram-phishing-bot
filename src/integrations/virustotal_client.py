@@ -50,11 +50,15 @@ class VirusTotalClient:
         cache_save: Optional[Callable[[int, str, str, dict], Any]] = None,
     ):
         self._api_key = (api_key or config.VIRUSTOTAL_API_KEY).strip()
-        if not self._api_key:
-            raise ValueError("VIRUSTOTAL_API_KEY не задан")
         self._cache_get = cache_get
         self._cache_save = cache_save
-        self._headers = {"x-apikey": self._api_key}
+        self._enabled = bool(self._api_key)
+        self._headers = {"x-apikey": self._api_key} if self._enabled else {}
+
+    @property
+    def is_enabled(self) -> bool:
+        """True, если клиент может выполнять внешние запросы к VirusTotal."""
+        return self._enabled
 
     def _request(
         self,
@@ -63,6 +67,8 @@ class VirusTotalClient:
         **kwargs: Any,
     ) -> httpx.Response:
         """Выполняет HTTP-запрос с обработкой 429 и повторными попытками."""
+        if not self._enabled:
+            raise VirusTotalError("VirusTotal client disabled: API key is missing")
         url = path if path.startswith("http") else f"{VT_BASE}{path}"
         timeout = kwargs.pop("timeout", REQUEST_TIMEOUT)
         with httpx.Client(timeout=timeout, headers=self._headers) as client:
@@ -75,7 +81,7 @@ class VirusTotalClient:
                         wait = int(retry_after)
                     except ValueError:
                         pass
-                logger.warning("VirusTotal rate limit (429), ожидание %s с", wait)
+                logger.warning("VirusTotal rate limit (429), waiting %s seconds", wait)
                 time.sleep(wait)
                 return self._request(method, path, timeout=timeout, **kwargs)
             return response
@@ -97,9 +103,9 @@ class VirusTotalClient:
             if status == "completed":
                 return data
             if status == "failed":
-                raise VirusTotalError("Анализ VirusTotal завершился с ошибкой")
+                raise VirusTotalError("VirusTotal analysis finished with an error.")
             time.sleep(POLL_INTERVAL)
-        raise VirusTotalError("Превышено время ожидания результата VirusTotal")
+        raise VirusTotalError("Timeout while waiting for VirusTotal analysis result.")
 
     def scan_url(
         self,
@@ -125,14 +131,14 @@ class VirusTotalClient:
         r = self._request("POST", "/urls", data={"url": url})
         if r.status_code not in (200, 201):
             if r.status_code == 429:
-                raise VirusTotalRateLimitError("Превышен лимит запросов VirusTotal")
+                raise VirusTotalRateLimitError("VirusTotal rate limit exceeded.")
             raise VirusTotalError(
                 f"VirusTotal URL scan: {r.status_code} — {r.text[:500]}"
             )
         body = r.json()
         analysis_id = (body.get("data", {}) or {}).get("id")
         if not analysis_id:
-            raise VirusTotalError("VirusTotal не вернул ID анализа")
+            raise VirusTotalError("VirusTotal did not return an analysis ID.")
 
         result = self._poll_analysis_until_complete(analysis_id)
         if self._cache_save and scan_id is not None:
@@ -151,7 +157,7 @@ class VirusTotalClient:
             return None
         if r.status_code != 200:
             if r.status_code == 429:
-                raise VirusTotalRateLimitError("Превышен лимит запросов VirusTotal")
+                raise VirusTotalRateLimitError("VirusTotal rate limit exceeded.")
             raise VirusTotalError(
                 f"VirusTotal file report: {r.status_code} — {r.text[:500]}"
             )
@@ -167,7 +173,7 @@ class VirusTotalClient:
         """
         path = Path(file_path)
         if not path.is_file():
-            raise FileNotFoundError(f"Файл не найден: {path}")
+            raise FileNotFoundError(f"File not found: {path}")
 
         with open(path, "rb") as f:
             content = f.read()
@@ -181,14 +187,14 @@ class VirusTotalClient:
         )
         if r.status_code not in (200, 201):
             if r.status_code == 429:
-                raise VirusTotalRateLimitError("Превышен лимит запросов VirusTotal")
+                raise VirusTotalRateLimitError("VirusTotal rate limit exceeded.")
             raise VirusTotalError(
                 f"VirusTotal file upload: {r.status_code} — {r.text[:500]}"
             )
         body = r.json()
         analysis_id = (body.get("data", {}) or {}).get("id")
         if not analysis_id:
-            raise VirusTotalError("VirusTotal не вернул ID анализа после загрузки файла")
+            raise VirusTotalError("VirusTotal did not return an analysis ID after file upload.")
         return self._poll_analysis_until_complete(analysis_id)
 
     def scan_file(

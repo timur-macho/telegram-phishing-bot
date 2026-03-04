@@ -48,20 +48,20 @@ def _build_analysis_prompt(
     vt_safe = sanitize_for_llm(vt_summary)
     ctx_safe = sanitize_for_llm(extra_context or "")
 
-    prompt = f"""Ты — аналитик по кибербезопасности. Тебе переданы результаты автоматической проверки объекта и данные VirusTotal. Твоя задача — проанализировать их и вернуть строго структурированный вывод. Ты не принимаешь финальных решений о безопасности; твой вывод используется как аналитический слой.
+    prompt = f"""You are a cybersecurity analyst. You are given automated scan data and VirusTotal signals. Analyze the evidence and return a strictly structured assessment. You are an analytical layer and do not make final enforcement decisions.
 
-Тип объекта: {scan_type}
-Объект проверки: {obj_safe}
-Сводка VirusTotal: {vt_safe}
+Object type: {scan_type}
+Scanned object: {obj_safe}
+VirusTotal summary: {vt_safe}
 """
     if ctx_safe:
-        prompt += f"\nДополнительный контекст: {ctx_safe}\n"
+        prompt += f"\nAdditional context: {ctx_safe}\n"
     prompt += """
-Ответь только валидным JSON без markdown и пояснений, в следующем формате:
+Return only valid JSON, with no markdown or extra text, in this format:
 {
   "threat_type": "phishing" | "malware" | "scam" | "suspicious" | "clean",
   "risk_level": "low" | "medium" | "high",
-  "explanation": "Краткое человекопонятное объяснение на русском (1–2 предложения)"
+  "explanation": "Brief, human-readable explanation in English (1–2 sentences)"
 }
 """
     return prompt
@@ -77,7 +77,7 @@ def _extract_json_from_content(content: str) -> dict[str, Any]:
     # Ищем первый { ... }
     start = text.find("{")
     if start == -1:
-        raise LLMResponseError("В ответе LLM не найден JSON-объект")
+        raise LLMResponseError("No JSON object found in LLM response.")
     depth = 0
     end = -1
     for i in range(start, len(text)):
@@ -89,32 +89,32 @@ def _extract_json_from_content(content: str) -> dict[str, Any]:
                 end = i + 1
                 break
     if end == -1:
-        raise LLMResponseError("В ответе LLM некорректная структура JSON")
+        raise LLMResponseError("Malformed JSON structure in LLM response.")
     try:
         return json.loads(text[start:end])
     except json.JSONDecodeError as e:
-        raise LLMResponseError(f"Ошибка парсинга JSON от LLM: {e}") from e
+        raise LLMResponseError(f"Failed to parse JSON from LLM response: {e}") from e
 
 
 def _validate_llm_response(data: dict[str, Any]) -> dict[str, Any]:
     """Проверяет наличие и допустимость threat_type, risk_level, explanation."""
     if not isinstance(data, dict):
-        raise LLMResponseError("Ответ LLM не является объектом")
+        raise LLMResponseError("LLM response is not a JSON object.")
     threat = data.get("threat_type")
     if not threat or not isinstance(threat, str):
-        raise LLMResponseError("В ответе LLM отсутствует или некорректен threat_type")
+        raise LLMResponseError("LLM response is missing a valid threat_type.")
     threat_lower = threat.strip().lower()
     if threat_lower not in THREAT_TYPES:
         raise LLMResponseError(
-            f"Недопустимое значение threat_type: {threat}. Ожидается одно из: {sorted(THREAT_TYPES)}"
+            f"Invalid threat_type value: {threat}. Expected one of: {sorted(THREAT_TYPES)}"
         )
     risk = data.get("risk_level")
     if not risk or not isinstance(risk, str):
-        raise LLMResponseError("В ответе LLM отсутствует или некорректен risk_level")
+        raise LLMResponseError("LLM response is missing a valid risk_level.")
     risk_lower = risk.strip().lower()
     if risk_lower not in RISK_LEVELS:
         raise LLMResponseError(
-            f"Недопустимое значение risk_level: {risk}. Ожидается одно из: {sorted(RISK_LEVELS)}"
+            f"Invalid risk_level value: {risk}. Expected one of: {sorted(RISK_LEVELS)}"
         )
     explanation = data.get("explanation")
     if explanation is not None and not isinstance(explanation, str):
@@ -139,10 +139,14 @@ class LLMClient:
     ):
         self._api_key = (api_key or config.OPENROUTER_API_KEY).strip()
         self._model = (model or config.OPENROUTER_MODEL).strip()
-        if not self._api_key:
-            raise ValueError("OPENROUTER_API_KEY не задан")
-        if not self._model:
-            raise ValueError("OPENROUTER_MODEL не задан")
+        self._enabled = bool(
+            self._api_key and self._model and config.is_extended_mode()
+        )
+
+    @property
+    def is_enabled(self) -> bool:
+        """True, если клиент может выполнять внешний LLM-анализ."""
+        return self._enabled
 
     def analyze(
         self,
@@ -158,6 +162,11 @@ class LLMClient:
         Raises:
             LLMError: при ошибке API или невалидном ответе.
         """
+        if not self._enabled:
+            raise LLMError(
+                "LLM client is disabled: OPENROUTER_API_KEY is missing or SCAN_MODE is not EXTENDED."
+            )
+
         prompt = _build_analysis_prompt(
             scan_type=scan_type,
             object_description=object_description,
@@ -183,29 +192,29 @@ class LLMClient:
                 if r.status_code == 400 and "response_format" in (r.text or "").lower():
                     r = client.post(OPENROUTER_URL, json=payload, headers=headers)
         except httpx.TimeoutException as e:
-            raise LLMError("Превышено время ожидания ответа от LLM") from e
+            raise LLMError("Timed out while waiting for LLM response.") from e
         except httpx.RequestError as e:
-            raise LLMError(f"Ошибка запроса к LLM: {e}") from e
+            raise LLMError(f"LLM request failed: {e}") from e
 
         if r.status_code != 200:
             msg = r.text[:500] if r.text else r.reason_phrase
             if r.status_code == 429:
-                raise LLMError("Превышен лимит запросов к LLM (429)")
+                raise LLMError("LLM rate limit exceeded (429).")
             if r.status_code == 401:
-                raise LLMError("Неверный API-ключ OpenRouter")
-            raise LLMError(f"LLM API вернул {r.status_code}: {msg}")
+                raise LLMError("Invalid OpenRouter API key.")
+            raise LLMError(f"LLM API returned {r.status_code}: {msg}")
 
         try:
             body = r.json()
         except json.JSONDecodeError as e:
-            raise LLMError("Ответ LLM не является валидным JSON") from e
+            raise LLMError("LLM response is not valid JSON.") from e
 
         choices = body.get("choices")
         if not choices or not isinstance(choices, list):
-            raise LLMResponseError("В ответе LLM отсутствует choices")
+            raise LLMResponseError("LLM response is missing choices.")
         msg = choices[0].get("message") if choices else None
         if not msg or not isinstance(msg, dict):
-            raise LLMResponseError("В ответе LLM отсутствует message")
+            raise LLMResponseError("LLM response is missing message.")
         content = msg.get("content")
         if content is None:
             content = ""
@@ -231,7 +240,7 @@ def vt_summary_from_result(vt_result: dict[str, Any], object_type: str = "url") 
     Поддерживает и полный ответ API (data.attributes.stats), и вложенный объект (attributes.stats).
     """
     if not vt_result or not isinstance(vt_result, dict):
-        return "Данные VirusTotal отсутствуют."
+        return "VirusTotal data is unavailable."
     data = vt_result.get("data") or vt_result
     attrs = data.get("attributes") or {}
     stats = attrs.get("last_analysis_stats") or attrs.get("stats") or {}

@@ -10,6 +10,7 @@ from src.security.security import (
     sanitize_for_llm,
 )
 from src.security.rate_limiter import RateLimiter, rate_limiter
+from src.security.url_analyzer import analyze_url_heuristic
 
 __all__ = [
     "hash_telegram_id",
@@ -19,6 +20,7 @@ __all__ = [
     "check_file_size",
     "sanitize_input",
     "sanitize_for_llm",
+    "analyze_url_heuristic",
     "RateLimiter",
     "rate_limiter",
 ]

@@ -55,9 +55,9 @@ class RateLimiter:
                 mins = int(wait_sec // 60)
                 secs = int(wait_sec % 60)
                 if mins > 0:
-                    msg = f"Слишком много запросов. Попробуйте через {mins} мин."
+                    msg = f"Rate limit exceeded. Please try again in {mins} minute(s)."
                 else:
-                    msg = f"Слишком много запросов. Подождите {secs} сек."
+                    msg = f"Rate limit exceeded. Please wait {secs} second(s)."
                 return False, msg
         return True, None
 

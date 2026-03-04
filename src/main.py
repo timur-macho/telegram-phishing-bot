@@ -1,13 +1,10 @@
-"""
-Главный файл для запуска Telegram бота.
-"""
+﻿"""Main entry point for launching the Telegram bot (URL-only mode)."""
 import asyncio
 import logging
 import re
 import sys
 from pathlib import Path
 
-# Корень проекта в PYTHONPATH при запуске через python src/main.py
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -18,14 +15,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from src.config import config
 from src.database import init_db
 from src.processors.link_processor import process_url as process_url_sync
-from src.processors.file_processor import process_file as process_file_sync
 from src.security.rate_limiter import rate_limiter
-from src.utils.file_utils import get_mime_type, safe_delete
 
-# Создаём директории (logs, temp и т.д.) до настройки логирования
 config.ensure_directories()
 
-# Настройка логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=getattr(logging, config.LOG_LEVEL),
@@ -37,7 +30,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# Одна ссылка http(s) в сообщении
 URL_PATTERN = re.compile(
     r"https?://[^\s<>\"']+",
     re.IGNORECASE,
@@ -45,140 +37,99 @@ URL_PATTERN = re.compile(
 
 
 def _format_scan_result(result: dict) -> str:
-    """Форматирует результат проверки для сообщения пользователю (эмодзи + объяснение)."""
+    """Format URL scan results for user-facing Telegram responses."""
     if not result.get("success"):
-        return result.get("error_message", "Произошла ошибка.")
-    risk = result.get("risk_level", "").lower()
-    threat = result.get("threat_type", "").lower()
-    explanation = (result.get("explanation") or "").strip()
-    if threat == "clean" or risk == "low":
-        emoji = "🟢"
-        label = "Безопасно"
-    elif risk == "high" or threat in ("phishing", "malware", "scam"):
-        emoji = "🔴"
-        label = "Опасно"
-    else:
-        emoji = "🟡"
-        label = "Подозрительно"
-    parts = [f"{emoji} {label}"]
-    if explanation:
-        parts.append(explanation)
-    return "\n\n".join(parts)
+        return result.get("error_message", "An unexpected error occurred.")
+
+    if "verdict" in result and "risk_score" in result:
+        url = (result.get("url") or "").strip()
+        verdict = str(result.get("verdict") or "suspicious").upper()
+        risk_score = int(result.get("risk_score") or 0)
+        reasons = result.get("reasons") or []
+
+        lines = [
+            "URL Analysis",
+            "",
+            f"Link: {url}",
+            "",
+            f"Risk Score: {risk_score}",
+            "",
+            f"Verdict: {verdict}",
+            "",
+            "Reasons:",
+        ]
+        if reasons:
+            lines.extend([f"- {str(reason)}" for reason in reasons])
+        else:
+            lines.append("- No explicit indicators found.")
+        return "\n".join(lines)
+
+    return "Analysis completed, but no structured URL report was produced."
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start."""
+    """Handle /start command."""
     user = update.effective_user
     logger.info("User %s started the bot", user.id)
 
     welcome_message = (
-        "👋 Привет! Я помогу проверить ссылки и файлы на безопасность.\n\n"
-        "Отправь мне ссылку, файл или голосовое сообщение для проверки."
+        "Welcome to the Phishing Detection Bot.\n\n"
+        "Send a URL and I will analyze it using heuristic phishing detection techniques "
+        "to identify suspicious or malicious links."
     )
-
     await update.message.reply_text(welcome_message)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик текстовых сообщений: извлечение ссылки и проверка."""
+    """Handle text messages: extract one URL and run analysis."""
     user = update.effective_user
     text = (update.message.text or "").strip()
     logger.info("Received text from user %s", user.id)
 
     urls = URL_PATTERN.findall(text)
     if not urls:
-        await update.message.reply_text("Отправьте одну ссылку для проверки (http или https).")
+        await update.message.reply_text("Please send exactly one URL for analysis (http or https).")
         return
     if len(urls) > 1:
-        await update.message.reply_text("Отправьте только одну ссылку за раз.")
+        await update.message.reply_text("Please send only one URL at a time.")
         return
     url = urls[0].rstrip(".,;:!?)")
 
     allowed, limit_msg = rate_limiter.is_allowed(user.id)
     if not allowed:
-        await update.message.reply_text(limit_msg or "Слишком много запросов. Подождите.")
+        await update.message.reply_text(limit_msg or "Rate limit exceeded. Please wait before trying again.")
         return
     rate_limiter.record_request(user.id)
 
-    status_msg = await update.message.reply_text("Проверяю ссылку…")
+    status_msg = await update.message.reply_text("Running URL analysis...")
     try:
         result = await asyncio.to_thread(process_url_sync, url, user.id)
     except Exception as e:
         logger.exception("Link processing error: %s", e)
-        await status_msg.edit_text("Произошла ошибка при проверке. Попробуйте позже. Подробности в logs/bot.log.")
+        await status_msg.edit_text(
+            "URL analysis failed due to an internal error. Please try again later. "
+            "See logs/bot.log for details."
+        )
         return
+
     if not result.get("success"):
         logger.warning("Link check failed for user %s: %s", user.id, result.get("error_message"))
     reply = _format_scan_result(result)
     await status_msg.edit_text(reply)
 
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик документов: скачивание во временный каталог и проверка файла."""
-    user = update.effective_user
-    document = update.message.document
-    logger.info("Received document from user %s", user.id)
-
-    allowed, limit_msg = rate_limiter.is_allowed(user.id)
-    if not allowed:
-        await update.message.reply_text(limit_msg or "Слишком много запросов. Подождите.")
-        return
-    rate_limiter.record_request(user.id)
-
-    status_msg = await update.message.reply_text("Проверяю файл…")
-    file_path = None
-    try:
-        tg_file = await context.bot.get_file(document.file_id)
-        # Сохраняем во временный каталог проекта
-        dest_dir = Path(config.UPLOADS_DIR)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = (document.file_name or "file").replace("..", "_").strip() or "file"
-        file_path = dest_dir / f"{document.file_id}_{safe_name}"
-        await tg_file.download_to_drive(custom_path=str(file_path))
-
-        file_size = file_path.stat().st_size
-        mime_type = get_mime_type(file_path=file_path)
-
-        result = await asyncio.to_thread(
-            process_file_sync,
-            file_path,
-            file_size,
-            mime_type,
-            user.id,
-        )
-    except Exception as e:
-        logger.exception("File processing error: %s", e)
-        if file_path and file_path.is_file():
-            safe_delete(file_path)
-        await status_msg.edit_text("Произошла ошибка при проверке файла. Попробуйте позже. Подробности в logs/bot.log.")
-        return
-
-    if not result.get("success"):
-        logger.warning("File check failed for user %s: %s", user.id, result.get("error_message"))
-    reply = _format_scan_result(result)
-    await status_msg.edit_text(reply)
-
-
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик голосовых сообщений."""
-    logger.info("Received voice from user %s", update.effective_user.id)
-    await update.message.reply_text(
-        "Функционал обработки голосовых сообщений будет реализован в следующих этапах."
-    )
-
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик ошибок."""
+    """Global Telegram update error handler."""
     logger.error("Exception while handling an update: %s", context.error, exc_info=context.error)
 
     if update and update.effective_message:
         await update.effective_message.reply_text(
-            "Произошла ошибка при обработке запроса. Попробуйте позже."
+            "An internal error occurred while processing your request. Please try again later."
         )
 
 
 def main() -> None:
-    """Главная функция для запуска бота."""
+    """Run the bot."""
     is_valid, error = config.validate()
     if not is_valid:
         logger.error("Configuration error: %s", error)
@@ -188,14 +139,11 @@ def main() -> None:
     init_db()
 
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_error_handler(error_handler)
 
-    logger.info("Bot is starting...")
+    logger.info("Bot is starting in URL-only mode...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

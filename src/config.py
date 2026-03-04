@@ -35,6 +35,9 @@ class Config:
     # OpenRouter API
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+    # Scan mode: LOCAL (no external APIs) or EXTENDED (VirusTotal + LLM when available)
+    SCAN_MODE: str = os.getenv("SCAN_MODE", "LOCAL").strip().upper() or "LOCAL"
     
     # Database
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "./data/bot.db")
@@ -76,21 +79,40 @@ class Config:
         missing = []
         if _empty(cls.TELEGRAM_BOT_TOKEN):
             missing.append("TELEGRAM_BOT_TOKEN")
-        if _empty(cls.VIRUSTOTAL_API_KEY):
-            missing.append("VIRUSTOTAL_API_KEY")
-        if _empty(cls.OPENROUTER_API_KEY):
-            missing.append("OPENROUTER_API_KEY")
+        if cls.SCAN_MODE not in {"LOCAL", "EXTENDED"}:
+            return False, "SCAN_MODE must be either LOCAL or EXTENDED."
 
         if missing:
             env_path = Path(cls.PROJECT_ROOT) / ".env"
             return False, (
-                f"В файле .env не заданы: {', '.join(missing)}. "
-                f"Приложение читает переменные из файла .env (не из .env.example). "
-                f"Путь к .env: {env_path.resolve()}. "
-                f"Если ключи указаны только в .env.example — скопируйте их в .env или выполните: copy .env.example .env"
+                f"Missing required variables in .env: {', '.join(missing)}. "
+                f"The application reads variables from .env (not .env.example). "
+                f".env path: {env_path.resolve()}. "
+                f"If values exist only in .env.example, copy them to .env "
+                f"(e.g., copy .env.example .env)."
             )
         
         return True, None
+
+    @classmethod
+    def is_local_mode(cls) -> bool:
+        """True, если включен локальный режим сканирования."""
+        return cls.SCAN_MODE == "LOCAL"
+
+    @classmethod
+    def is_extended_mode(cls) -> bool:
+        """True, если включен расширенный режим сканирования."""
+        return cls.SCAN_MODE == "EXTENDED"
+
+    @classmethod
+    def has_virustotal(cls) -> bool:
+        """True, если задан ключ VirusTotal."""
+        return bool((cls.VIRUSTOTAL_API_KEY or "").strip())
+
+    @classmethod
+    def has_llm(cls) -> bool:
+        """True, если задан ключ OpenRouter."""
+        return bool((cls.OPENROUTER_API_KEY or "").strip())
     
     @classmethod
     def ensure_directories(cls) -> None:
