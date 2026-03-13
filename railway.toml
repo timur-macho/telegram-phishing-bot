@@ -1,5 +1,5 @@
 [build]
-builder = "python"
+builder = "nixpacks"
 
 [deploy]
 startCommand = "python src/main.py"
